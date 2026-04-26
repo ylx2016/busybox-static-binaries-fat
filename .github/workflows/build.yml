@@ -9,14 +9,12 @@ env:
   BUSYBOX_DIRNAME: busybox-1.36.1
 
 jobs:
-  # 阶段一：矩阵并行编译
   compile:
     runs-on: ubuntu-24.04
     strategy:
-      fail-fast: false # 即使某个架构失败，也不中断其他架构的编译
+      fail-fast: false
       matrix:
         include:
-          # 修复了这里的 YAML 单行对象语法：使用 {} 和逗号
           - { arch: x86_64, prefix: '', pkg: 'build-essential', suffix: 'x86_64-linux-gnu' }
           - { arch: aarch64, prefix: 'aarch64-linux-gnu-', pkg: 'g++-aarch64-linux-gnu', suffix: 'aarch64-linux-gnu' }
           - { arch: arm, prefix: 'arm-linux-gnueabi-', pkg: 'g++-arm-linux-gnueabi', suffix: 'arm-linux-gnueabi' }
@@ -33,7 +31,8 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends wget make ca-certificates bzip2
+          # 加入了 xz-utils 确保可以解压 .tar.xz
+          sudo apt-get install -y --no-install-recommends wget make ca-certificates bzip2 xz-utils
           if [ "${{ matrix.pkg }}" != "riscv32-custom" ]; then
             sudo apt-get install -y --no-install-recommends ${{ matrix.pkg }}
           fi
@@ -42,7 +41,8 @@ jobs:
         if: matrix.pkg == 'riscv32-custom'
         run: |
           sudo mkdir -p /usr/local/rv32
-          wget -O- -q $RISCV32_TOOLCHAIN_URL | sudo tar -C /usr/local/rv32 --strip-components=1 -xf -
+          # 修复1：使用 -Jxf 显式指定 xz 解压，解决 stdin 无法识别格式的问题
+          wget -O- -q $RISCV32_TOOLCHAIN_URL | sudo tar -C /usr/local/rv32 --strip-components=1 -Jxf -
           sudo ln -sf /usr/local/rv32/sysroot /usr/riscv32-linux-gnu
           sudo ln -sf /usr/local/rv32/bin/riscv32-unknown-linux-gnu-ar /usr/bin/riscv32-linux-gnu-ar
           sudo ln -sf /usr/local/rv32/bin/riscv32-unknown-linux-gnu-strip /usr/bin/riscv32-linux-gnu-strip
@@ -56,7 +56,13 @@ jobs:
           export ARCH=${{ matrix.arch }}
           export CROSS_COMPILE=${{ matrix.prefix }}
           make defconfig
-          sed -e 's/.*\<CONFIG_STATIC\>.*/CONFIG_STATIC=y/' -i .config
+          
+          # 开启静态编译
+          sed -i 's/.*\<CONFIG_STATIC\>.*/CONFIG_STATIC=y/' .config
+          
+          # 修复2：强制关闭 WERROR，防止高版本 GCC 把新出的 Warning 拦截成 Error
+          sed -i 's/^CONFIG_WERROR=y/# CONFIG_WERROR is not set/' .config
+          
           make -j$(($(nproc)+1))
           
           if [ -n "${{ matrix.prefix }}" ]; then
@@ -74,7 +80,6 @@ jobs:
           path: busybox-${{ matrix.suffix }}
           retention-days: 1
 
-  # 阶段二：合并收集与提交
   commit:
     needs: compile
     runs-on: ubuntu-24.04
@@ -116,4 +121,4 @@ jobs:
       - uses: stefanzweifel/git-auto-commit-action@v5
         with:
           repository: ./main
-          commit_message: "Auto-build BusyBox 1.36.1 (Matrix Optimized)"
+          commit_message: "Auto-build BusyBox 1.36.1 (Fix tar format & gcc warnings)"
