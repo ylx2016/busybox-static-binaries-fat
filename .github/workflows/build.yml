@@ -16,24 +16,24 @@ jobs:
       fail-fast: false # 即使某个架构失败，也不中断其他架构的编译
       matrix:
         include:
-          - arch: x86_64  ; prefix: ''                        ; pkg: 'build-essential'             ; suffix: 'x86_64-linux-gnu'
-          - arch: aarch64 ; prefix: 'aarch64-linux-gnu-'      ; pkg: 'g++-aarch64-linux-gnu'       ; suffix: 'aarch64-linux-gnu'
-          - arch: arm     ; prefix: 'arm-linux-gnueabi-'      ; pkg: 'g++-arm-linux-gnueabi'       ; suffix: 'arm-linux-gnueabi'
-          - arch: arm     ; prefix: 'arm-linux-gnueabihf-'    ; pkg: 'g++-arm-linux-gnueabihf'     ; suffix: 'arm-linux-gnueabihf'
-          - arch: mips    ; prefix: 'mips-linux-gnu-'         ; pkg: 'g++-mips-linux-gnu'          ; suffix: 'mips-linux-gnu'
-          - arch: mips    ; prefix: 'mipsel-linux-gnu-'       ; pkg: 'g++-mipsel-linux-gnu'        ; suffix: 'mipsel-linux-gnu'
-          - arch: mips64  ; prefix: 'mips64-linux-gnuabi64-'  ; pkg: 'g++-mips64-linux-gnuabi64'   ; suffix: 'mips64-linux-gnuabi64'
-          - arch: mips64  ; prefix: 'mips64el-linux-gnuabi64-'; pkg: 'g++-mips64el-linux-gnuabi64' ; suffix: 'mips64el-linux-gnuabi64'
-          - arch: powerpc ; prefix: 'powerpc64le-linux-gnu-'  ; pkg: 'g++-powerpc64le-linux-gnu'   ; suffix: 'powerpc64le-linux-gnu'
-          - arch: riscv   ; prefix: 'riscv64-linux-gnu-'      ; pkg: 'g++-riscv64-linux-gnu'       ; suffix: 'riscv64-linux-gnu'
-          - arch: riscv   ; prefix: 'riscv32-linux-gnu-'      ; pkg: 'riscv32-custom'              ; suffix: 'riscv32-linux-gnu'
+          # 修复了这里的 YAML 单行对象语法：使用 {} 和逗号
+          - { arch: x86_64, prefix: '', pkg: 'build-essential', suffix: 'x86_64-linux-gnu' }
+          - { arch: aarch64, prefix: 'aarch64-linux-gnu-', pkg: 'g++-aarch64-linux-gnu', suffix: 'aarch64-linux-gnu' }
+          - { arch: arm, prefix: 'arm-linux-gnueabi-', pkg: 'g++-arm-linux-gnueabi', suffix: 'arm-linux-gnueabi' }
+          - { arch: arm, prefix: 'arm-linux-gnueabihf-', pkg: 'g++-arm-linux-gnueabihf', suffix: 'arm-linux-gnueabihf' }
+          - { arch: mips, prefix: 'mips-linux-gnu-', pkg: 'g++-mips-linux-gnu', suffix: 'mips-linux-gnu' }
+          - { arch: mips, prefix: 'mipsel-linux-gnu-', pkg: 'g++-mipsel-linux-gnu', suffix: 'mipsel-linux-gnu' }
+          - { arch: mips64, prefix: 'mips64-linux-gnuabi64-', pkg: 'g++-mips64-linux-gnuabi64', suffix: 'mips64-linux-gnuabi64' }
+          - { arch: mips64, prefix: 'mips64el-linux-gnuabi64-', pkg: 'g++-mips64el-linux-gnuabi64', suffix: 'mips64el-linux-gnuabi64' }
+          - { arch: powerpc, prefix: 'powerpc64le-linux-gnu-', pkg: 'g++-powerpc64le-linux-gnu', suffix: 'powerpc64le-linux-gnu' }
+          - { arch: riscv, prefix: 'riscv64-linux-gnu-', pkg: 'g++-riscv64-linux-gnu', suffix: 'riscv64-linux-gnu' }
+          - { arch: riscv, prefix: 'riscv32-linux-gnu-', pkg: 'riscv32-custom', suffix: 'riscv32-linux-gnu' }
 
     steps:
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends wget make ca-certificates bzip2
-          # 动态安装对应的交叉编译环境，避免无意义的全局安装，提升速度
           if [ "${{ matrix.pkg }}" != "riscv32-custom" ]; then
             sudo apt-get install -y --no-install-recommends ${{ matrix.pkg }}
           fi
@@ -59,7 +59,6 @@ jobs:
           sed -e 's/.*\<CONFIG_STATIC\>.*/CONFIG_STATIC=y/' -i .config
           make -j$(($(nproc)+1))
           
-          # 【核心优化】使用对应架构的 strip 移除二进制文件中的调试符号和无用信息，大幅缩减体积
           if [ -n "${{ matrix.prefix }}" ]; then
             ${{ matrix.prefix }}strip busybox || true
           else
@@ -68,7 +67,6 @@ jobs:
           
           mv busybox ../busybox-${{ matrix.suffix }}
 
-      # 上传当前架构编译好的单文件作为临时产物
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -78,7 +76,7 @@ jobs:
 
   # 阶段二：合并收集与提交
   commit:
-    needs: compile # 等待矩阵中所有架构全部编译完成
+    needs: compile
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -87,7 +85,6 @@ jobs:
         with:
           path: main
 
-      # v4 版本的 pattern 功能可以一次性拉取上面并行的 11 个产物
       - name: Download all binaries
         uses: actions/download-artifact@v4
         with:
@@ -104,7 +101,7 @@ jobs:
         working-directory: main
         run: |
           chmod +x busybox-*
-          mv README.md README.md.old
+          mv README.md README.md.old || touch README.md.old
           head -n2 README.md.old > README.md
           echo -e "busybox v${BUSYBOX_DIRNAME##busybox-} static binaries\n" >> README.md
           echo '```console' >> README.md
@@ -114,7 +111,7 @@ jobs:
           echo '```console' >> README.md
           /bin/bash -c 'PS4="$ "; set -x; qemu-aarch64-static ./busybox-aarch64-linux-gnu' &>> README.md
           echo '```' >> README.md
-          rm README.md.old
+          rm -f README.md.old
 
       - uses: stefanzweifel/git-auto-commit-action@v5
         with:
