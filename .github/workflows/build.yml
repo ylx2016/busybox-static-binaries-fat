@@ -10,22 +10,25 @@ env:
 
 jobs:
   compile:
-    runs-on: ubuntu-24.04
+    # 这里的 runs-on 会根据下面 matrix 里的 os 动态变化！
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { arch: x86_64, prefix: '', pkg: 'build-essential', suffix: 'x86_64-linux-gnu' }
-          - { arch: aarch64, prefix: 'aarch64-linux-gnu-', pkg: 'g++-aarch64-linux-gnu', suffix: 'aarch64-linux-gnu' }
-          - { arch: arm, prefix: 'arm-linux-gnueabi-', pkg: 'g++-arm-linux-gnueabi', suffix: 'arm-linux-gnueabi' }
-          - { arch: arm, prefix: 'arm-linux-gnueabihf-', pkg: 'g++-arm-linux-gnueabihf', suffix: 'arm-linux-gnueabihf' }
-          - { arch: mips, prefix: 'mips-linux-gnu-', pkg: 'g++-mips-linux-gnu', suffix: 'mips-linux-gnu' }
-          - { arch: mips, prefix: 'mipsel-linux-gnu-', pkg: 'g++-mipsel-linux-gnu', suffix: 'mipsel-linux-gnu' }
-          - { arch: mips64, prefix: 'mips64-linux-gnuabi64-', pkg: 'g++-mips64-linux-gnuabi64', suffix: 'mips64-linux-gnuabi64' }
-          - { arch: mips64, prefix: 'mips64el-linux-gnuabi64-', pkg: 'g++-mips64el-linux-gnuabi64', suffix: 'mips64el-linux-gnuabi64' }
-          - { arch: powerpc, prefix: 'powerpc64le-linux-gnu-', pkg: 'g++-powerpc64le-linux-gnu', suffix: 'powerpc64le-linux-gnu' }
-          - { arch: riscv, prefix: 'riscv64-linux-gnu-', pkg: 'g++-riscv64-linux-gnu', suffix: 'riscv64-linux-gnu' }
-          - { arch: riscv, prefix: 'riscv32-linux-gnu-', pkg: 'riscv32-custom', suffix: 'riscv32-linux-gnu' }
+          # 其他所有架构：使用稳定可靠的 ubuntu-22.04
+          - { arch: x86_64,  prefix: '',                         pkg: 'build-essential',             suffix: 'x86_64-linux-gnu',      os: ubuntu-22.04 }
+          - { arch: aarch64, prefix: 'aarch64-linux-gnu-',       pkg: 'g++-aarch64-linux-gnu',       suffix: 'aarch64-linux-gnu',     os: ubuntu-22.04 }
+          - { arch: arm,     prefix: 'arm-linux-gnueabi-',       pkg: 'g++-arm-linux-gnueabi',       suffix: 'arm-linux-gnueabi',     os: ubuntu-22.04 }
+          - { arch: arm,     prefix: 'arm-linux-gnueabihf-',     pkg: 'g++-arm-linux-gnueabihf',     suffix: 'arm-linux-gnueabihf',   os: ubuntu-22.04 }
+          - { arch: mips,    prefix: 'mips-linux-gnu-',          pkg: 'g++-mips-linux-gnu',          suffix: 'mips-linux-gnu',        os: ubuntu-22.04 }
+          - { arch: mips,    prefix: 'mipsel-linux-gnu-',        pkg: 'g++-mipsel-linux-gnu',        suffix: 'mipsel-linux-gnu',      os: ubuntu-22.04 }
+          - { arch: mips64,  prefix: 'mips64-linux-gnuabi64-',   pkg: 'g++-mips64-linux-gnuabi64',   suffix: 'mips64-linux-gnuabi64', os: ubuntu-22.04 }
+          - { arch: mips64,  prefix: 'mips64el-linux-gnuabi64-', pkg: 'g++-mips64el-linux-gnuabi64', suffix: 'mips64el-linux-gnuabi64', os: ubuntu-22.04 }
+          - { arch: powerpc, prefix: 'powerpc64le-linux-gnu-',   pkg: 'g++-powerpc64le-linux-gnu',   suffix: 'powerpc64le-linux-gnu', os: ubuntu-22.04 }
+          - { arch: riscv,   prefix: 'riscv64-linux-gnu-',       pkg: 'g++-riscv64-linux-gnu',       suffix: 'riscv64-linux-gnu',     os: ubuntu-22.04 }
+          # 唯独 RISC-V 32：使用最新的 ubuntu-24.04 以兼容其高版本工具链
+          - { arch: riscv,   prefix: 'riscv32-linux-gnu-',       pkg: 'riscv32-custom',              suffix: 'riscv32-linux-gnu',     os: ubuntu-24.04 }
 
     steps:
       - name: Install dependencies
@@ -55,14 +58,17 @@ jobs:
           export CROSS_COMPILE=${{ matrix.prefix }}
           make defconfig
           
-          # 开启静态编译，并修改 WERROR 配置
+          # 开启静态编译
           sed -i 's/.*CONFIG_STATIC.*/CONFIG_STATIC=y/' .config
+          # 关闭警告转错误
           sed -i 's/.*CONFIG_WERROR.*/# CONFIG_WERROR is not set/' .config
+          # 强制使用内置加密库，避免新版 Ubuntu 找不到 libcrypt.a 的 Fatal Error
+          sed -i 's/.*CONFIG_USE_BB_CRYPT.*/CONFIG_USE_BB_CRYPT=y/' .config
           
-          # 【核心修复】自动处理 sed 修改配置后引发的新增选项依赖（如 STATIC_LIBGCC），一路回车确认
           yes "" | make oldconfig
           
-          make -j$(($(nproc)+1)) EXTRA_CFLAGS="-Wno-error"
+          # 加入豁免 GCC 14 严格语法的指令
+          make -j$(($(nproc)+1)) EXTRA_CFLAGS="-Wno-error -Wno-implicit-function-declaration -Wno-incompatible-pointer-types"
           
           if [ -n "${{ matrix.prefix }}" ]; then
             ${{ matrix.prefix }}strip busybox || true
@@ -120,4 +126,4 @@ jobs:
       - uses: stefanzweifel/git-auto-commit-action@v5
         with:
           repository: ./main
-          commit_message: "Auto-build BusyBox 1.36.1 (Fix oldconfig silent prompt)"
+          commit_message: "Auto-build BusyBox 1.36.1 (Matrix OS OS-Split Strategy)"
