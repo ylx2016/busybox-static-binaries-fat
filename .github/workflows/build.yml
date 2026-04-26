@@ -56,12 +56,16 @@ jobs:
           export CROSS_COMPILE=${{ matrix.prefix }}
           make defconfig
           
-          # 静态编译基础配置
+          # 静态编译与强力忽略警告
           sed -i 's/.*CONFIG_STATIC.*/CONFIG_STATIC=y/' .config
           sed -i 's/.*CONFIG_WERROR.*/# CONFIG_WERROR is not set/' .config
           
-          # 【核心修复】：强制所有跨平台架构使用内置 crypt 库，避开缺少系统 libcrypt.a 的链接报错
+          # 强制所有跨平台架构使用内置 crypt 库
           sed -i 's/.*CONFIG_USE_BB_CRYPT.*/CONFIG_USE_BB_CRYPT=y/' .config
+          
+          # 【终极修复：解决 1.37.0 的 SHA 硬件加速跨平台 Bug】
+          sed -i 's/.*CONFIG_SHA1_HWACCEL.*/# CONFIG_SHA1_HWACCEL is not set/' .config
+          sed -i 's/.*CONFIG_SHA256_HWACCEL.*/# CONFIG_SHA256_HWACCEL is not set/' .config
           
           # 针对 riscv32 极其超前的自定义头文件，单独隔离禁用 tc
           if [ "${{ matrix.pkg }}" == "riscv32-custom" ]; then
@@ -70,7 +74,6 @@ jobs:
           
           yes "" | make oldconfig
           
-          # 加入更强力的忽略警告参数
           make -j$(($(nproc)+1)) EXTRA_CFLAGS="-Wno-error -Wno-implicit-function-declaration -Wno-incompatible-pointer-types"
           
           if [ -n "${{ matrix.prefix }}" ]; then
@@ -129,4 +132,4 @@ jobs:
       - uses: stefanzweifel/git-auto-commit-action@v5
         with:
           repository: ./main
-          commit_message: "Auto-build BusyBox 1.37.0 (Fix cross-compile static linking)"
+          commit_message: "Auto-build BusyBox 1.37.0 (Fix SHA-NI hardware acceleration cross-compile bug)"
