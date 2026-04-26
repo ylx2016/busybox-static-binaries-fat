@@ -31,7 +31,6 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          # 加入了 xz-utils 确保可以解压 .tar.xz
           sudo apt-get install -y --no-install-recommends wget make ca-certificates bzip2 xz-utils
           if [ "${{ matrix.pkg }}" != "riscv32-custom" ]; then
             sudo apt-get install -y --no-install-recommends ${{ matrix.pkg }}
@@ -41,7 +40,6 @@ jobs:
         if: matrix.pkg == 'riscv32-custom'
         run: |
           sudo mkdir -p /usr/local/rv32
-          # 修复1：使用 -Jxf 显式指定 xz 解压，解决 stdin 无法识别格式的问题
           wget -O- -q $RISCV32_TOOLCHAIN_URL | sudo tar -C /usr/local/rv32 --strip-components=1 -Jxf -
           sudo ln -sf /usr/local/rv32/sysroot /usr/riscv32-linux-gnu
           sudo ln -sf /usr/local/rv32/bin/riscv32-unknown-linux-gnu-ar /usr/bin/riscv32-linux-gnu-ar
@@ -57,13 +55,12 @@ jobs:
           export CROSS_COMPILE=${{ matrix.prefix }}
           make defconfig
           
-          # 开启静态编译
-          sed -i 's/.*\<CONFIG_STATIC\>.*/CONFIG_STATIC=y/' .config
+          # 开启静态编译，并修改 WERROR 配置
+          sed -i 's/.*CONFIG_STATIC.*/CONFIG_STATIC=y/' .config
+          sed -i 's/.*CONFIG_WERROR.*/# CONFIG_WERROR is not set/' .config
           
-          # 修复2：强制关闭 WERROR，防止高版本 GCC 把新出的 Warning 拦截成 Error
-          sed -i 's/^CONFIG_WERROR=y/# CONFIG_WERROR is not set/' .config
-          
-          make -j$(($(nproc)+1))
+          # 【核心修复】强制通过 EXTRA_CFLAGS 注入 -Wno-error，彻底忽略所有警告导致的编译中断
+          make -j$(($(nproc)+1)) EXTRA_CFLAGS="-Wno-error"
           
           if [ -n "${{ matrix.prefix }}" ]; then
             ${{ matrix.prefix }}strip busybox || true
@@ -121,4 +118,4 @@ jobs:
       - uses: stefanzweifel/git-auto-commit-action@v5
         with:
           repository: ./main
-          commit_message: "Auto-build BusyBox 1.36.1 (Fix tar format & gcc warnings)"
+          commit_message: "Auto-build BusyBox 1.36.1 (Force disable WERROR)"
