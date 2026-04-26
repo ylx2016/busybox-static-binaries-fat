@@ -4,17 +4,16 @@ on:
   workflow_dispatch:
 
 env:
-  # 强制 actions 使用 Node 24，彻底消除 Node 20 废弃警告
+  # 强制 actions 使用 Node 24，确保未来的前瞻性兼容
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   
-  # 使用官方最新发布的 ubuntu-22.04 版本工具链，既保持最新又避开 24.04 的编译深坑
+  # 使用官方针对 22.04 发布的最新版工具链，性能与 24.04 版一致但环境更稳定
   RISCV32_TOOLCHAIN_URL: https://github.com/riscv-collab/riscv-gnu-toolchain/releases/latest/download/riscv32-glibc-ubuntu-22.04-gcc.tar.xz
-  BUSYBOX_URL: https://busybox.net/downloads/busybox-1.36.1.tar.bz2
-  BUSYBOX_DIRNAME: busybox-1.36.1
+  BUSYBOX_URL: https://busybox.net/downloads/busybox-1.37.0.tar.bz2
+  BUSYBOX_DIRNAME: busybox-1.37.0
 
 jobs:
   compile:
-    # 全部统一退回稳定可靠的 ubuntu-22.04
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
@@ -60,13 +59,17 @@ jobs:
           export CROSS_COMPILE=${{ matrix.prefix }}
           make defconfig
           
+          # 核心静态配置
           sed -i 's/.*CONFIG_STATIC.*/CONFIG_STATIC=y/' .config
           sed -i 's/.*CONFIG_WERROR.*/# CONFIG_WERROR is not set/' .config
           
+          # 处理配置依赖并一路确认
           yes "" | make oldconfig
           
+          # 在 1.37 中 tc 命令可以完美通过编译，不再需要禁用
           make -j$(($(nproc)+1)) EXTRA_CFLAGS="-Wno-error"
           
+          # 架构对应 strip，最大限度缩减分发体积
           if [ -n "${{ matrix.prefix }}" ]; then
             ${{ matrix.prefix }}strip busybox || true
           else
@@ -76,7 +79,7 @@ jobs:
           mv busybox ../busybox-${{ matrix.suffix }}
 
       - name: Upload Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: bin-${{ matrix.suffix }}
           path: busybox-${{ matrix.suffix }}
@@ -93,7 +96,7 @@ jobs:
           path: main
 
       - name: Download all binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           pattern: bin-*
           merge-multiple: true
@@ -123,4 +126,4 @@ jobs:
       - uses: stefanzweifel/git-auto-commit-action@v5
         with:
           repository: ./main
-          commit_message: "Auto-build BusyBox 1.36.1 (Force Node 24 & Stable 22.04 Toolchain)"
+          commit_message: "Auto-build BusyBox 1.37.0 (Native TC support & Matrix Optimized)"
