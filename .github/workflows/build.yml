@@ -4,31 +4,33 @@ on:
   workflow_dispatch:
 
 env:
-  RISCV32_TOOLCHAIN_URL: https://github.com/riscv-collab/riscv-gnu-toolchain/releases/latest/download/riscv32-glibc-ubuntu-24.04-gcc.tar.xz
+  # 强制 actions 使用 Node 24，彻底消除 Node 20 废弃警告
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  
+  # 使用官方最新发布的 ubuntu-22.04 版本工具链，既保持最新又避开 24.04 的编译深坑
+  RISCV32_TOOLCHAIN_URL: https://github.com/riscv-collab/riscv-gnu-toolchain/releases/latest/download/riscv32-glibc-ubuntu-22.04-gcc.tar.xz
   BUSYBOX_URL: https://busybox.net/downloads/busybox-1.36.1.tar.bz2
   BUSYBOX_DIRNAME: busybox-1.36.1
 
 jobs:
   compile:
-    # 这里的 runs-on 会根据下面 matrix 里的 os 动态变化！
-    runs-on: ${{ matrix.os }}
+    # 全部统一退回稳定可靠的 ubuntu-22.04
+    runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
       matrix:
         include:
-          # 其他所有架构：使用稳定可靠的 ubuntu-22.04
-          - { arch: x86_64,  prefix: '',                         pkg: 'build-essential',             suffix: 'x86_64-linux-gnu',      os: ubuntu-22.04 }
-          - { arch: aarch64, prefix: 'aarch64-linux-gnu-',       pkg: 'g++-aarch64-linux-gnu',       suffix: 'aarch64-linux-gnu',     os: ubuntu-22.04 }
-          - { arch: arm,     prefix: 'arm-linux-gnueabi-',       pkg: 'g++-arm-linux-gnueabi',       suffix: 'arm-linux-gnueabi',     os: ubuntu-22.04 }
-          - { arch: arm,     prefix: 'arm-linux-gnueabihf-',     pkg: 'g++-arm-linux-gnueabihf',     suffix: 'arm-linux-gnueabihf',   os: ubuntu-22.04 }
-          - { arch: mips,    prefix: 'mips-linux-gnu-',          pkg: 'g++-mips-linux-gnu',          suffix: 'mips-linux-gnu',        os: ubuntu-22.04 }
-          - { arch: mips,    prefix: 'mipsel-linux-gnu-',        pkg: 'g++-mipsel-linux-gnu',        suffix: 'mipsel-linux-gnu',      os: ubuntu-22.04 }
-          - { arch: mips64,  prefix: 'mips64-linux-gnuabi64-',   pkg: 'g++-mips64-linux-gnuabi64',   suffix: 'mips64-linux-gnuabi64', os: ubuntu-22.04 }
-          - { arch: mips64,  prefix: 'mips64el-linux-gnuabi64-', pkg: 'g++-mips64el-linux-gnuabi64', suffix: 'mips64el-linux-gnuabi64', os: ubuntu-22.04 }
-          - { arch: powerpc, prefix: 'powerpc64le-linux-gnu-',   pkg: 'g++-powerpc64le-linux-gnu',   suffix: 'powerpc64le-linux-gnu', os: ubuntu-22.04 }
-          - { arch: riscv,   prefix: 'riscv64-linux-gnu-',       pkg: 'g++-riscv64-linux-gnu',       suffix: 'riscv64-linux-gnu',     os: ubuntu-22.04 }
-          # 唯独 RISC-V 32：使用最新的 ubuntu-24.04 以兼容其高版本工具链
-          - { arch: riscv,   prefix: 'riscv32-linux-gnu-',       pkg: 'riscv32-custom',              suffix: 'riscv32-linux-gnu',     os: ubuntu-24.04 }
+          - { arch: x86_64,  prefix: '',                         pkg: 'build-essential',             suffix: 'x86_64-linux-gnu' }
+          - { arch: aarch64, prefix: 'aarch64-linux-gnu-',       pkg: 'g++-aarch64-linux-gnu',       suffix: 'aarch64-linux-gnu' }
+          - { arch: arm,     prefix: 'arm-linux-gnueabi-',       pkg: 'g++-arm-linux-gnueabi',       suffix: 'arm-linux-gnueabi' }
+          - { arch: arm,     prefix: 'arm-linux-gnueabihf-',     pkg: 'g++-arm-linux-gnueabihf',     suffix: 'arm-linux-gnueabihf' }
+          - { arch: mips,    prefix: 'mips-linux-gnu-',          pkg: 'g++-mips-linux-gnu',          suffix: 'mips-linux-gnu' }
+          - { arch: mips,    prefix: 'mipsel-linux-gnu-',        pkg: 'g++-mipsel-linux-gnu',        suffix: 'mipsel-linux-gnu' }
+          - { arch: mips64,  prefix: 'mips64-linux-gnuabi64-',   pkg: 'g++-mips64-linux-gnuabi64',   suffix: 'mips64-linux-gnuabi64' }
+          - { arch: mips64,  prefix: 'mips64el-linux-gnuabi64-', pkg: 'g++-mips64el-linux-gnuabi64', suffix: 'mips64el-linux-gnuabi64' }
+          - { arch: powerpc, prefix: 'powerpc64le-linux-gnu-',   pkg: 'g++-powerpc64le-linux-gnu',   suffix: 'powerpc64le-linux-gnu' }
+          - { arch: riscv,   prefix: 'riscv64-linux-gnu-',       pkg: 'g++-riscv64-linux-gnu',       suffix: 'riscv64-linux-gnu' }
+          - { arch: riscv,   prefix: 'riscv32-linux-gnu-',       pkg: 'riscv32-custom',              suffix: 'riscv32-linux-gnu' }
 
     steps:
       - name: Install dependencies
@@ -58,17 +60,12 @@ jobs:
           export CROSS_COMPILE=${{ matrix.prefix }}
           make defconfig
           
-          # 开启静态编译
           sed -i 's/.*CONFIG_STATIC.*/CONFIG_STATIC=y/' .config
-          # 关闭警告转错误
           sed -i 's/.*CONFIG_WERROR.*/# CONFIG_WERROR is not set/' .config
-          # 强制使用内置加密库，避免新版 Ubuntu 找不到 libcrypt.a 的 Fatal Error
-          sed -i 's/.*CONFIG_USE_BB_CRYPT.*/CONFIG_USE_BB_CRYPT=y/' .config
           
           yes "" | make oldconfig
           
-          # 加入豁免 GCC 14 严格语法的指令
-          make -j$(($(nproc)+1)) EXTRA_CFLAGS="-Wno-error -Wno-implicit-function-declaration -Wno-incompatible-pointer-types"
+          make -j$(($(nproc)+1)) EXTRA_CFLAGS="-Wno-error"
           
           if [ -n "${{ matrix.prefix }}" ]; then
             ${{ matrix.prefix }}strip busybox || true
@@ -87,7 +84,7 @@ jobs:
 
   commit:
     needs: compile
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
     permissions:
       contents: write
     steps:
@@ -126,4 +123,4 @@ jobs:
       - uses: stefanzweifel/git-auto-commit-action@v5
         with:
           repository: ./main
-          commit_message: "Auto-build BusyBox 1.36.1 (Matrix OS OS-Split Strategy)"
+          commit_message: "Auto-build BusyBox 1.36.1 (Force Node 24 & Stable 22.04 Toolchain)"
