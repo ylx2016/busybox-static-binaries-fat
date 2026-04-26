@@ -59,7 +59,9 @@ jobs:
           sed -i 's/.*CONFIG_STATIC.*/CONFIG_STATIC=y/' .config
           sed -i 's/.*CONFIG_WERROR.*/# CONFIG_WERROR is not set/' .config
           
-          # 【核心修复】强制通过 EXTRA_CFLAGS 注入 -Wno-error，彻底忽略所有警告导致的编译中断
+          # 【核心修复】自动处理 sed 修改配置后引发的新增选项依赖（如 STATIC_LIBGCC），一路回车确认
+          yes "" | make oldconfig
+          
           make -j$(($(nproc)+1)) EXTRA_CFLAGS="-Wno-error"
           
           if [ -n "${{ matrix.prefix }}" ]; then
@@ -118,4 +120,4 @@ jobs:
       - uses: stefanzweifel/git-auto-commit-action@v5
         with:
           repository: ./main
-          commit_message: "Auto-build BusyBox 1.36.1 (Force disable WERROR)"
+          commit_message: "Auto-build BusyBox 1.36.1 (Fix oldconfig silent prompt)"
