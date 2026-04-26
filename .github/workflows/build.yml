@@ -4,10 +4,7 @@ on:
   workflow_dispatch:
 
 env:
-  # 强制 actions 使用 Node 24，确保未来的前瞻性兼容
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  
-  # 使用官方针对 22.04 发布的最新版工具链，性能与 24.04 版一致但环境更稳定
   RISCV32_TOOLCHAIN_URL: https://github.com/riscv-collab/riscv-gnu-toolchain/releases/latest/download/riscv32-glibc-ubuntu-22.04-gcc.tar.xz
   BUSYBOX_URL: https://busybox.net/downloads/busybox-1.37.0.tar.bz2
   BUSYBOX_DIRNAME: busybox-1.37.0
@@ -59,17 +56,23 @@ jobs:
           export CROSS_COMPILE=${{ matrix.prefix }}
           make defconfig
           
-          # 核心静态配置
+          # 静态编译基础配置
           sed -i 's/.*CONFIG_STATIC.*/CONFIG_STATIC=y/' .config
           sed -i 's/.*CONFIG_WERROR.*/# CONFIG_WERROR is not set/' .config
           
-          # 处理配置依赖并一路确认
+          # 【核心修复】：强制所有跨平台架构使用内置 crypt 库，避开缺少系统 libcrypt.a 的链接报错
+          sed -i 's/.*CONFIG_USE_BB_CRYPT.*/CONFIG_USE_BB_CRYPT=y/' .config
+          
+          # 针对 riscv32 极其超前的自定义头文件，单独隔离禁用 tc
+          if [ "${{ matrix.pkg }}" == "riscv32-custom" ]; then
+            sed -i 's/.*CONFIG_TC=.*/# CONFIG_TC is not set/' .config
+          fi
+          
           yes "" | make oldconfig
           
-          # 在 1.37 中 tc 命令可以完美通过编译，不再需要禁用
-          make -j$(($(nproc)+1)) EXTRA_CFLAGS="-Wno-error"
+          # 加入更强力的忽略警告参数
+          make -j$(($(nproc)+1)) EXTRA_CFLAGS="-Wno-error -Wno-implicit-function-declaration -Wno-incompatible-pointer-types"
           
-          # 架构对应 strip，最大限度缩减分发体积
           if [ -n "${{ matrix.prefix }}" ]; then
             ${{ matrix.prefix }}strip busybox || true
           else
@@ -126,4 +129,4 @@ jobs:
       - uses: stefanzweifel/git-auto-commit-action@v5
         with:
           repository: ./main
-          commit_message: "Auto-build BusyBox 1.37.0 (Native TC support & Matrix Optimized)"
+          commit_message: "Auto-build BusyBox 1.37.0 (Fix cross-compile static linking)"
