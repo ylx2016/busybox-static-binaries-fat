@@ -5,9 +5,27 @@ on:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  RISCV32_TOOLCHAIN_URL: https://github.com/riscv-collab/riscv-gnu-toolchain/releases/latest/download/riscv32-glibc-ubuntu-22.04-gcc.tar.xz
-  BUSYBOX_URL: https://busybox.net/downloads/busybox-1.37.0.tar.bz2
-  BUSYBOX_DIRNAME: busybox-1.37.0
+  # 钉到具体 release tag。原来用 releases/latest/download/…，latest 是移动目标，
+  # 上游换一次资产就等于让 CI 以 sudo 跑一段新代码，构建产物也失去可复现性。
+  RISCV32_TOOLCHAIN_URL: https://github.com/riscv-collab/riscv-gnu-toolchain/releases/download/2026.10.29/riscv32-glibc-ubuntu-22.04-gcc.tar.xz
+  # 上游 release 不提供校验和文件。填上实测值即强制校验；留空则只打印，不改行为。
+  RISCV32_TOOLCHAIN_SHA256: ""
+  # 版本号只在这里改一处：下载 URL 与解压目录名都由它推导
+  BUSYBOX_VERSION: 1.38.0
+  # 改 BUSYBOX_VERSION 时必须同步改这一行（取自 https://busybox.net/downloads/busybox-<ver>.tar.bz2.sha256）
+  BUSYBOX_SHA256: 34f9ea6ff8636f2c9241153b9114eefa9e65674a45318ae1ef95bb5f31c53bb2
+  # 矩阵里的 suffix 个数。少于这个数就拒绝生成 SHA256SUMS，避免残缺清单被下游当完整清单用。
+  EXPECTED_BINS: 11
+
+# 最小权限：默认只读，写权限只给 commit job（compile 要跑网络下载来的代码）
+permissions:
+  contents: read
+
+# 同一时刻只允许一个构建。并发运行会各自编译出比特不同的二进制，
+# 却写同一个 SHA256SUMS 文件名，下游拿到的哈希会随机对不上。
+concurrency:
+  group: busybox-build-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   compile:
@@ -24,7 +42,7 @@ jobs:
           - { arch: mips,    prefix: 'mipsel-linux-gnu-',        pkg: 'g++-mipsel-linux-gnu',        suffix: 'mipsel-linux-gnu' }
           - { arch: mips64,  prefix: 'mips64-linux-gnuabi64-',   pkg: 'g++-mips64-linux-gnuabi64',   suffix: 'mips64-linux-gnuabi64' }
           - { arch: mips64,  prefix: 'mips64el-linux-gnuabi64-', pkg: 'g++-mips64el-linux-gnuabi64', suffix: 'mips64el-linux-gnuabi64' }
-          - { arch: powerpc, prefix: 'powerpc64le-linux-gnu-',   pkg: 'g++-powerpc64le-linux-gnu',   suffix: 'powerpc64le-linux-gnu' }
+          - { arch: powerpc64le, prefix: 'powerpc64le-linux-gnu-', pkg: 'g++-powerpc64le-linux-gnu', suffix: 'powerpc64le-linux-gnu' }
           - { arch: riscv,   prefix: 'riscv64-linux-gnu-',       pkg: 'g++-riscv64-linux-gnu',       suffix: 'riscv64-linux-gnu' }
           - { arch: riscv,   prefix: 'riscv32-linux-gnu-',       pkg: 'riscv32-custom',              suffix: 'riscv32-linux-gnu' }
 
@@ -34,34 +52,81 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends wget make ca-certificates bzip2 xz-utils
           if [ "${{ matrix.pkg }}" != "riscv32-custom" ]; then
-            sudo apt-get install -y --no-install-recommends ${{ matrix.pkg }}
+            sudo apt-get install -y --no-install-recommends "${{ matrix.pkg }}"
           fi
 
       - name: Setup Custom RISC-V 32 Toolchain
         if: matrix.pkg == 'riscv32-custom'
         run: |
-          sudo mkdir -p /usr/local/rv32
-          wget -O- -q $RISCV32_TOOLCHAIN_URL | sudo tar -C /usr/local/rv32 --strip-components=1 -Jxf -
-          sudo ln -sf /usr/local/rv32/sysroot /usr/riscv32-linux-gnu
-          sudo ln -sf /usr/local/rv32/bin/riscv32-unknown-linux-gnu-ar /usr/bin/riscv32-linux-gnu-ar
-          sudo ln -sf /usr/local/rv32/bin/riscv32-unknown-linux-gnu-strip /usr/bin/riscv32-linux-gnu-strip
+          set -euo pipefail
+          tc="${RUNNER_TEMP:-/tmp}/rv32-toolchain.tar.xz"
+          wget -q -O "$tc" "$RISCV32_TOOLCHAIN_URL"
+          actual="$(sha256sum "$tc" | awk '{print $1}')"
+          if [ -n "${RISCV32_TOOLCHAIN_SHA256}" ]; then
+            if [ "$actual" != "${RISCV32_TOOLCHAIN_SHA256}" ]; then
+              echo "riscv32 工具链 SHA256 不匹配：实测 $actual"
+              exit 1
+            fi
+            echo "riscv32 工具链 SHA256 校验通过"
+          else
+            echo "WARN: 未配置 RISCV32_TOOLCHAIN_SHA256，实测哈希 $actual —— 请核对后写进 workflow env"
+          fi
+          # 先解到普通用户目录：tarball 里的符号链接成员在 root 身份下解包时，
+          # 后续成员可以顺着链接写到 /usr/local 之外。
+          stage="${RUNNER_TEMP:-/tmp}/rv32-stage"
+          rm -rf "$stage"
+          mkdir -p "$stage"
+          tar -C "$stage" --strip-components=1 --no-same-owner -Jxf "$tc"
+
+          # 布局断言：ln -sf 对不存在的目标同样返回 0，不检查就会留下悬空链接，
+          # 直到 make 阶段才以「找不到编译器/sysroot」的形式炸掉，很难定位。
+          [ -d "$stage/sysroot" ] || { echo "工具链里没有 sysroot/，上游目录布局变了"; exit 1; }
+          for b in gcc ar strip; do
+            [ -x "$stage/bin/riscv32-unknown-linux-gnu-$b" ] || { echo "工具链缺少 bin/riscv32-unknown-linux-gnu-$b"; exit 1; }
+          done
+
+          sudo rm -rf /usr/local/rv32
+          sudo mv "$stage" /usr/local/rv32
+          sudo chown -R root:root /usr/local/rv32
+          sudo ln -sfn /usr/local/rv32/sysroot /usr/riscv32-linux-gnu
+          sudo ln -sfn /usr/local/rv32/bin/riscv32-unknown-linux-gnu-ar /usr/bin/riscv32-linux-gnu-ar
+          sudo ln -sfn /usr/local/rv32/bin/riscv32-unknown-linux-gnu-strip /usr/bin/riscv32-linux-gnu-strip
           echo '/usr/local/rv32/bin/riscv32-unknown-linux-gnu-gcc -L/usr/riscv32-linux-gnu "$@"' | sudo tee /usr/bin/riscv32-linux-gnu-gcc > /dev/null
           sudo chmod +x /usr/bin/riscv32-linux-gnu-gcc
 
       - name: Build BusyBox
         run: |
-          wget -O- -q $BUSYBOX_URL | tar jxf -
-          cd $BUSYBOX_DIRNAME
-          export ARCH=${{ matrix.arch }}
-          export CROSS_COMPILE=${{ matrix.prefix }}
+          set -euo pipefail
+          BUSYBOX_DIRNAME="busybox-${BUSYBOX_VERSION}"
+          tarball="${RUNNER_TEMP:-/tmp}/${BUSYBOX_DIRNAME}.tar.bz2"
+          wget -q -O "$tarball" "https://busybox.net/downloads/${BUSYBOX_DIRNAME}.tar.bz2"
+          actual="$(sha256sum "$tarball" | awk '{print $1}')"
+          if [ -n "${BUSYBOX_SHA256}" ]; then
+            if [ "$actual" != "${BUSYBOX_SHA256}" ]; then
+              echo "busybox 源包 SHA256 不匹配：实测 $actual"
+              exit 1
+            fi
+            echo "busybox 源包 SHA256 校验通过"
+          else
+            echo "WARN: 未配置 BUSYBOX_SHA256，实测哈希 $actual"
+          fi
+          tar jxf "$tarball"
+          cd "$BUSYBOX_DIRNAME"
+          export ARCH="${{ matrix.arch }}"
+          export CROSS_COMPILE="${{ matrix.prefix }}"
           make defconfig
           
-          # 静态编译与强力忽略警告
-          sed -i 's/.*CONFIG_STATIC.*/CONFIG_STATIC=y/' .config
-          sed -i 's/.*CONFIG_WERROR.*/# CONFIG_WERROR is not set/' .config
+          # 静态编译与强力忽略警告。
+          # 各处 sed 都锚定 ^CONFIG_ 前缀：1.38 里还有 CONFIG_STATIC_LIBGCC，
+          # 用 .*CONFIG_STATIC.* 会把它一起改成 CONFIG_STATIC=y，产生重复键且丢掉原设置。
+          sed -i -e 's/^# CONFIG_STATIC is not set$/CONFIG_STATIC=y/' -e 's/^CONFIG_STATIC=.*/CONFIG_STATIC=y/' .config
+          grep -q '^CONFIG_STATIC=y$' .config || echo 'CONFIG_STATIC=y' >> .config
+          sed -i 's/^CONFIG_WERROR=.*/# CONFIG_WERROR is not set/' .config
           
-          # 强制所有跨平台架构使用内置 crypt 库
-          sed -i 's/.*CONFIG_USE_BB_CRYPT.*/CONFIG_USE_BB_CRYPT=y/' .config
+          # 强制所有跨平台架构使用内置 crypt 库。
+          # 锚定行首，否则会连带命中 CONFIG_USE_BB_CRYPT_SHA / _YES，把这两行覆盖成重复键，
+          # oldconfig 再把它们当新符号按默认值回填 —— 上游改默认值时 SHA512/yescrypt 会静默消失。
+          sed -i -e 's/^# CONFIG_USE_BB_CRYPT is not set$/CONFIG_USE_BB_CRYPT=y/' -e 's/^CONFIG_USE_BB_CRYPT=.*/CONFIG_USE_BB_CRYPT=y/' .config
           
           # 【终极修复：解决 1.37.0 的 SHA 硬件加速跨平台 Bug】
           sed -i 's/.*CONFIG_SHA1_HWACCEL.*/# CONFIG_SHA1_HWACCEL is not set/' .config
@@ -72,41 +137,73 @@ jobs:
             sed -i 's/.*CONFIG_TC=.*/# CONFIG_TC is not set/' .config
           fi
           
-          yes "" | make oldconfig
+          # yes 被 SIGPIPE 终止会返回 141，在 pipefail 下会把整步判成失败；子 shell 内局部关掉
+          ( set +o pipefail; yes "" | make oldconfig )
+
+          # 断言必须在 oldconfig 之后：oldconfig 会直接丢弃它不认识的键，
+          # 放在前面等于用「grep 通过」掩盖「符号已被丢弃」，产出动态链接也全绿。
+          grep -qx 'CONFIG_STATIC=y' .config || { echo "CONFIG_STATIC 未生效"; exit 1; }
           
           make -j$(($(nproc)+1)) EXTRA_CFLAGS="-Wno-error -Wno-implicit-function-declaration -Wno-incompatible-pointer-types"
           
+          # 二进制级兜底：.config 断言挡不住「符号存在但没生效」
+          if ! file busybox | grep -q 'statically linked'; then
+            echo "产物不是静态链接：$(file busybox)"
+            exit 1
+          fi
+
+          # 不再用 || true：strip 失败通常意味着 prefix 与产物不匹配，这是最有价值的信号
           if [ -n "${{ matrix.prefix }}" ]; then
-            ${{ matrix.prefix }}strip busybox || true
+            ${{ matrix.prefix }}strip busybox
           else
-            strip busybox || true
+            strip busybox
           fi
           
           mv busybox ../busybox-${{ matrix.suffix }}
 
       - name: Upload Artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: bin-${{ matrix.suffix }}
           path: busybox-${{ matrix.suffix }}
           retention-days: 1
 
   commit:
+    # needs: compile 是「全有全无」：任一架构失败，整个 commit 跳过，不会提交残缺清单。
+    # 下面 EXPECTED_BINS 断言是第二道锁，用于防「矩阵被删行但全部成功」这种残缺。
     needs: compile
     runs-on: ubuntu-22.04
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      # 所有 action 钉 40 位 commit SHA：浮动 tag 被上游改写即可在本 job 的
+      # contents: write 权限下推任意内容，而下游按文件名查 SHA256SUMS 完全看不出来。
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           path: main
+          persist-credentials: false
 
       - name: Download all binaries
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           pattern: bin-*
           merge-multiple: true
           path: main/
+
+      - name: Wipe stale binaries from previous commits
+        working-directory: main
+        run: |
+          set -euo pipefail
+          # checkout 会把上一版提交里的 busybox-* 一起检出到工作树。矩阵是
+          # fail-fast: false，某个架构编译失败时其余照常出产物，旧二进制就会
+          # 冒充新版本混进 SHA256SUMS —— 而下游正是按这个文件校验的。
+          rm -f busybox-* SHA256SUMS
+          # 在任何会「执行」产物的步骤之前先记下哈希。后面 README 步骤会用
+          # qemu-aarch64-static 跑 aarch64 产物；若产物被篡改，它能在同一 runner 上
+          # 改写其他文件，事后再算出的 SHA256SUMS 就成了一份合法的脏清单。
+          sha256sum busybox-* > .pre-exec.sha256
+          cat .pre-exec.sha256
+          ls -l
 
       - name: Install QEMU for README generation
         run: |
@@ -118,18 +215,79 @@ jobs:
         run: |
           chmod +x busybox-*
           mv README.md README.md.old || touch README.md.old
-          head -n2 README.md.old > README.md
-          echo -e "busybox v${BUSYBOX_DIRNAME##busybox-} static binaries\n" >> README.md
+          # 保留旧文件头部，但用哨兵截断：固定 head -n2 会在上游头部行数变化时
+          # 把上一次生成的版本行一起固化进新文件，逐次叠加成多条版本声明。
+          awk '/^busybox v/{exit} NR<=6 {print}' README.md.old > README.md
+          echo -e "busybox v${BUSYBOX_VERSION} static binaries\n" >> README.md
           echo '```console' >> README.md
           /bin/bash -c 'PS4="$ "; set -x; file busybox-*' &>> README.md
           echo -e '```\n' >> README.md
           echo '# bundled commands' >> README.md
           echo '```console' >> README.md
-          /bin/bash -c 'PS4="$ "; set -x; qemu-aarch64-static ./busybox-aarch64-linux-gnu' &>> README.md
+          # --list 只列 applet，不进入初始化逻辑；无参数调用会让 busybox 以 1 退出
+          /bin/bash -c 'PS4="$ "; set -x; qemu-aarch64-static ./busybox-aarch64-linux-gnu --list' &>> README.md
           echo '```' >> README.md
           rm -f README.md.old
 
-      - uses: stefanzweifel/git-auto-commit-action@v5
+          # 执行过产物之后再核一次：上面 qemu 实际跑过 aarch64 二进制，
+          # 若它改写了同目录下任何 busybox-*，这里立刻失败，脏文件进不了 SHA256SUMS。
+          sha256sum -c .pre-exec.sha256
+
+      - name: Assert ELF architecture matches filename
+        working-directory: main
+        run: |
+          set -euo pipefail
+          # 文件名与真实架构不符是最隐蔽的坏产物：下游按文件名挑目标机，
+          # 拿到架构错的文件只会在救援现场才炸，那时已经没法回头。
+          # 每行: suffix|位宽|端序|machine 关键词
+          while IFS='|' read -r suffix bits data mach; do
+            [ -n "$suffix" ] || continue
+            f="busybox-$suffix"
+            [ -f "$f" ] || { echo "缺少产物 $f"; exit 1; }
+            out="$(file -b "$f")"
+            case "$out" in
+              "ELF $bits-bit $data"*) ;;
+              *) echo "$f 位宽/端序不符：$out"; exit 1 ;;
+            esac
+            case "$out" in
+              *"$mach"*) ;;
+              *) echo "$f machine 不符：$out"; exit 1 ;;
+            esac
+          done <<'EOF'
+          x86_64-linux-gnu|64|LSB|x86-64
+          aarch64-linux-gnu|64|LSB|aarch64
+          arm-linux-gnueabi|32|LSB|ARM
+          arm-linux-gnueabihf|32|LSB|ARM
+          mips-linux-gnu|32|MSB|MIPS
+          mipsel-linux-gnu|32|LSB|MIPS
+          mips64-linux-gnuabi64|64|MSB|MIPS
+          mips64el-linux-gnuabi64|64|LSB|MIPS
+          powerpc64le-linux-gnu|64|LSB|PowerPC
+          riscv64-linux-gnu|64|LSB|RISC-V
+          riscv32-linux-gnu|32|LSB|RISC-V
+          EOF
+
+      - name: Generate SHA256SUMS
+        working-directory: main
+        run: |
+          set -euo pipefail
+          # 供下游脚本按文件名查哈希做完整性校验。
+          # 注意：与二进制同仓同分支，只能防传输损坏/镜像站篡改，防不了仓库本身被控；
+          # 要防后者，下游得固定 commit SHA（或把哈希固化进下游脚本）。
+          count="$(find . -maxdepth 1 -type f -name 'busybox-*' | wc -l)"
+          if [ "$count" -ne "${EXPECTED_BINS}" ]; then
+            echo "产物数量 $count ≠ 预期 ${EXPECTED_BINS}，拒绝生成残缺的 SHA256SUMS"
+            ls -l
+            exit 1
+          fi
+          sha256sum busybox-* > SHA256SUMS
+          cat SHA256SUMS
+
+      - uses: stefanzweifel/git-auto-commit-action@b863ae1933cb653a53c021fe36dbb774e1fb9403 # v5
         with:
           repository: ./main
-          commit_message: "Auto-build BusyBox 1.37.0 (Fix SHA-NI hardware acceleration cross-compile bug)"
+          # checkout 关了 persist-credentials，这里显式传 token（默认值就是 github.token）
+          token: ${{ secrets.GITHUB_TOKEN }}
+          # 只提交本流程产出的文件，避免 artifact 解出来的任何额外文件被顺手提交
+          file_pattern: "busybox-* README.md SHA256SUMS"
+          commit_message: "Auto-build BusyBox ${{ env.BUSYBOX_VERSION }} static binaries"
