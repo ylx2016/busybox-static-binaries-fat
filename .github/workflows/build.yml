@@ -187,23 +187,45 @@ jobs:
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           pattern: bin-*
-          merge-multiple: true
-          path: main/
+          # 不依赖 merge-multiple：它一旦没生效，产物会落在 <path>/<artifact-name>/ 子目录里，
+          # 后面按 busybox-* 通配就是空集（实际表现：sha256sum: 'busybox-*': No such file）。
+          # 统一丢到独立目录，下一步用 find 递归收集，两种布局都能吃。
+          path: main/_dl
 
-      - name: Wipe stale binaries from previous commits
+      - name: Stage binaries
         working-directory: main
         run: |
           set -euo pipefail
-          # checkout 会把上一版提交里的 busybox-* 一起检出到工作树。矩阵是
-          # fail-fast: false，某个架构编译失败时其余照常出产物，旧二进制就会
-          # 冒充新版本混进 SHA256SUMS —— 而下游正是按这个文件校验的。
+          shopt -s nullglob
+          # checkout 会把上一版提交里的 busybox-* 一起检出到工作树，先清掉。
           rm -f busybox-* SHA256SUMS
+
+          found=()
+          while IFS= read -r -d '' f; do found+=("$f"); done \
+            < <(find _dl -type f -name 'busybox-*' -print0 2>/dev/null)
+          echo "找到 ${#found[@]} 个产物（预期 ${EXPECTED_BINS}）"
+          printf '  %s\n' "${found[@]}"
+
+          # 断言放在最前面：少一个架构时，残缺清单会被下游当完整清单用。
+          if [ "${#found[@]}" -ne "${EXPECTED_BINS}" ]; then
+            echo "产物数量 ${#found[@]} ≠ 预期 ${EXPECTED_BINS}"
+            find _dl -maxdepth 3 -ls || true
+            exit 1
+          fi
+
+          for f in "${found[@]}"; do
+            base="$(basename "$f")"
+            if [ -e "$base" ]; then echo "重复产物名：$base"; exit 1; fi
+            mv "$f" .
+          done
+          rm -rf _dl
+          chmod +x busybox-*
+
           # 在任何会「执行」产物的步骤之前先记下哈希。后面 README 步骤会用
           # qemu-aarch64-static 跑 aarch64 产物；若产物被篡改，它能在同一 runner 上
           # 改写其他文件，事后再算出的 SHA256SUMS 就成了一份合法的脏清单。
           sha256sum busybox-* > .pre-exec.sha256
           cat .pre-exec.sha256
-          ls -l
 
       - name: Install QEMU for README generation
         run: |
