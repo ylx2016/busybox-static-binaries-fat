@@ -181,7 +181,11 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           path: main
-          persist-credentials: false
+          # 必须保留 credential（默认 true）：这个 job 的职责就是推送，
+          # 关了之后 git-auto-commit-action 的 push 会以
+          # "could not read Username for 'https://github.com'" 失败。
+          # 该 action 没有 token 输入项，靠的就是 checkout 写进 .git/config 的凭据。
+          persist-credentials: true
 
       - name: Download all binaries
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
@@ -308,8 +312,8 @@ jobs:
       - uses: stefanzweifel/git-auto-commit-action@b863ae1933cb653a53c021fe36dbb774e1fb9403 # v5
         with:
           repository: ./main
-          # checkout 关了 persist-credentials，这里显式传 token（默认值就是 github.token）
-          token: ${{ secrets.GITHUB_TOKEN }}
+          # 不传 token：这个 action 的合法输入里没有 token 项（传了只会 warn 被忽略），
+          # 认证完全依赖 checkout 写进 .git/config 的凭据。
           # 只提交本流程产出的文件，避免 artifact 解出来的任何额外文件被顺手提交
           file_pattern: "busybox-* README.md SHA256SUMS"
           commit_message: "Auto-build BusyBox ${{ env.BUSYBOX_VERSION }} static binaries"
